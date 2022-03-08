@@ -38,6 +38,8 @@ fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, Vec<(Url, S
 
     let mut link_count = 1;
     let mut matches = Vec::new();
+
+    // TODO: only search "visible" output (inner text)
     if let Some(cursor) = body.find(query) {
         matches.push((url.clone(), body[cursor-RANGE..cursor+query.len()+RANGE].to_string()));
     }
