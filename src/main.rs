@@ -1,5 +1,6 @@
 use clap::{arg, Arg, Command};
 
+use futures_util::StreamExt;
 use reqwest::Url;
 use scraper::{Html, Selector};
 use select::document::Document;
@@ -8,12 +9,12 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io;
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use futures_util::StreamExt;
-use tokio::sync::mpsc::UnboundedSender;
 
 type QueryMatches = Arc<RwLock<HashMap<Url, String>>>;
 
@@ -66,12 +67,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let query_matches = query_matches.clone();
             let link_queue_sender = link_queue_sender.clone();
             tokio::task::spawn(async move {
-                crawl_page(url, &query, depth, range, link_count, query_matches, link_queue_sender).await.unwrap();
+                crawl_page(
+                    url,
+                    &query,
+                    depth,
+                    range,
+                    link_count,
+                    query_matches,
+                    link_queue_sender,
+                )
+                .await
+                .unwrap();
             });
         }
     });
 
     link_queue_sender.send((Url::parse(url)?, depth))?;
+
+    // TODO: block until link_queue_receiver queue is empty and no more tasks are running.
+    //  Sleeping here is terrible, but at least we get some results.
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -99,7 +114,7 @@ async fn crawl_page(
     link_count: Arc<AtomicUsize>,
     query_matches: QueryMatches,
     link_queue_sender: UnboundedSender<(Url, usize)>,
-) -> Result<(), Box<dyn Error>>{
+) -> Result<(), Box<dyn Error>> {
     if depth == 0 {
         return Ok(());
     }
@@ -164,6 +179,17 @@ fn find_query(html: &str, query: &str, range: usize) -> Option<String> {
         Some(body) => body,
     };
     let text = body.text().collect::<Vec<_>>().join("");
-    text.find(query)
-        .map(|cursor| text[cursor - range..cursor + query.len() + range].to_string())
+    text.find(query).map(|cursor| {
+        let start = if cursor as isize - range as isize > 0 {
+            cursor - range
+        } else {
+            0
+        };
+        let end = if cursor + query.len() + range > text.len() {
+            text.len()
+        } else {
+            cursor + query.len() + range
+        };
+        text[start..end].to_string()
+    })
 }
