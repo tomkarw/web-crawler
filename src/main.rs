@@ -6,10 +6,11 @@ use std::error::Error;
 use std::io;
 use std::io::Write;
 use reqwest::Url;
+use scraper::{Html, Selector};
 
 const RANGE: usize = 3;
 const URL: &str = "https://www.layer0.co/";
-const QUERY: &str = "knowledge";
+const QUERY: &str = "Layer0";
 const DEPTH: usize = 2;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -40,9 +41,8 @@ fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, HashMap<Url
     let mut visited_count = 1;
     let mut matches = HashMap::new();
 
-    // TODO: only search "visible" output (inner text)
-    if let Some(cursor) = body.find(query) {
-        matches.insert(url.clone(), body[cursor-RANGE..cursor+query.len()+RANGE].to_string());
+    if let Some(matched) = find_query(&body, query) {
+        matches.insert(url.clone(), matched);
     }
 
     let links = Document::from(body.as_str())
@@ -88,4 +88,22 @@ fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, HashMap<Url
     }
 
     Ok((visited_count, matches))
+}
+
+// TODO: only search visible text
+fn find_query(html: &str, query: &str) -> Option<String> {
+    let fragment = Html::parse_fragment(html);
+    println!("{:?}", html);
+    let selector = Selector::parse("html").unwrap();
+    let body = match fragment.select(&selector).next() {
+        None => return None,
+        Some(body) => body
+    };
+    let text = body.text().collect::<Vec<_>>().join("");
+    println!("{}", text);
+    if let Some(cursor) = text.find(query) {
+        Some(text[cursor - RANGE..cursor + query.len() + RANGE].to_string())
+    } else {
+        None
+    }
 }
