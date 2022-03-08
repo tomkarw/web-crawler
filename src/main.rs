@@ -8,8 +8,17 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io;
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use futures_util::StreamExt;
+use tokio::sync::mpsc::UnboundedSender;
 
-fn main() -> Result<(), Box<dyn Error>> {
+type QueryMatches = Arc<RwLock<HashMap<Url, String>>>;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let arg_matches = Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -37,51 +46,76 @@ fn main() -> Result<(), Box<dyn Error>> {
         .parse::<usize>()
         .unwrap_or(3);
 
-    let (link_count, matches) = crawl_page(Url::parse(url)?, query, depth, range)?;
+    let link_count = Arc::new(AtomicUsize::new(0));
+    let query_matches = QueryMatches::new(Default::default());
+    let (link_queue_sender, link_queue_receiver) = mpsc::unbounded_channel::<(Url, usize)>();
+    let mut link_queue_receiver = UnboundedReceiverStream::new(link_queue_receiver);
+
+    let query_clone = query.to_string();
+    let link_count_clone = link_count.clone();
+    let query_matches_clone = query_matches.clone();
+    let link_queue_sender_clone = link_queue_sender.clone();
+    tokio::task::spawn(async move {
+        let query = query_clone.clone();
+        let link_count = link_count_clone.clone();
+        let query_matches = query_matches_clone.clone();
+        let link_queue_sender = link_queue_sender_clone.clone();
+        while let Some((url, depth)) = link_queue_receiver.next().await {
+            let query = query.clone();
+            let link_count = link_count.clone();
+            let query_matches = query_matches.clone();
+            let link_queue_sender = link_queue_sender.clone();
+            tokio::task::spawn(async move {
+                crawl_page(url, &query, depth, range, link_count, query_matches, link_queue_sender).await.unwrap();
+            });
+        }
+    });
+
+    link_queue_sender.send((Url::parse(url)?, depth))?;
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     stdout.write_all(
         (&format!(
             "Crawled {} pages. Found {} pages with the term `{}`\n",
-            link_count,
-            matches.len(),
+            link_count.load(Ordering::SeqCst),
+            query_matches.read().await.len(),
             query
         ))
             .as_ref(),
     )?;
-    for (url, snippet) in matches {
+    for (url, snippet) in query_matches.read().await.iter() {
         stdout.write_all((&format!("{} => {}\n", url, snippet)).as_ref())?;
     }
 
     Ok(())
 }
 
-fn crawl_page(
+async fn crawl_page(
     url: Url,
     query: &str,
     depth: usize,
     range: usize,
-) -> Result<(usize, HashMap<Url, String>), Box<dyn Error>> {
+    link_count: Arc<AtomicUsize>,
+    query_matches: QueryMatches,
+    link_queue_sender: UnboundedSender<(Url, usize)>,
+) -> Result<(), Box<dyn Error>>{
     if depth == 0 {
-        return Ok((0, HashMap::new()));
+        return Ok(());
     }
 
-    // TODO: this is very naive and slow approach which could definitely use async
-    //  had I more time, I sketched out an approach with
-    //  async threadpool, link_queue and results map
-    let response = reqwest::blocking::get(url.clone())?;
+    // TODO: make sure what ordering is needed
+    link_count.fetch_add(1, Ordering::AcqRel);
+
+    let response = reqwest::get(url.clone()).await?;
     // TODO: handle redirects
     if !response.status().is_success() {
-        return Ok((0, HashMap::new()));
+        return Ok(());
     }
-    let body = response.text()?;
-
-    let mut visited_count = 1;
-    let mut matches = HashMap::new();
+    let body = response.text().await?;
 
     if let Some(matched) = find_query(&body, query, range) {
-        matches.insert(url.clone(), matched);
+        query_matches.write().await.insert(url.clone(), matched);
     }
 
     let links = Document::from(body.as_str())
@@ -111,20 +145,14 @@ fn crawl_page(
 
     for link in links {
         // don't visit already visited links
-        if matches.contains_key(&link) {
+        if query_matches.read().await.contains_key(&link) {
             continue;
         }
 
-        let (child_visited_count, child_matches) = crawl_page(link, query, depth - 1, range)?;
-        visited_count += child_visited_count;
-
-        // only add new links
-        for (child_url, child_match) in child_matches {
-            matches.entry(child_url).or_insert(child_match);
-        }
+        link_queue_sender.send((link, depth - 1))?;
     }
 
-    Ok((visited_count, matches))
+    Ok(())
 }
 
 // TODO: only search visible text
