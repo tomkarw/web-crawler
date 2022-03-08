@@ -47,7 +47,14 @@ fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, Vec<(Url, S
         .filter_map(|anchor| anchor.attr("href"))
         .filter_map(|raw_url| {
             match Url::parse(raw_url) {
-                Ok(url) => Some(url),
+                Ok(new_url) => {
+                    // ignore pages on different domain
+                    if new_url.host() == url.host() {
+                        Some(new_url)
+                    } else {
+                        None
+                    }
+                },
                 Err(_) => {
                     // TODO: could there be relative links?
                     if raw_url.starts_with("/") {
