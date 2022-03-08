@@ -41,6 +41,9 @@ fn crawl_page(url: Url, query: &str, depth: usize, range: usize) -> Result<(usiz
         return Ok((0, HashMap::new()));
     }
 
+    // TODO: this is very naive and slow approach which could definitely use async
+    //  had I more time, I sketched out an approach with
+    //  async threadpool, link_queue and results map
     let response = reqwest::blocking::get(url.clone())?;
     // TODO: handle redirects
     if !response.status().is_success() {
