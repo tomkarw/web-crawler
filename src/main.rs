@@ -1,5 +1,5 @@
 use clap::{arg, Arg, Command};
-use reqwest;
+
 use reqwest::Url;
 use scraper::{Html, Selector};
 use select::document::Document;
@@ -99,7 +99,7 @@ fn crawl_page(
                 }
                 Err(_) => {
                     // TODO: could there be relative links?
-                    if raw_url.starts_with("/") {
+                    if raw_url.starts_with('/') {
                         url.join(raw_url).ok()
                     } else {
                         None
@@ -120,9 +120,7 @@ fn crawl_page(
 
         // only add new links
         for (child_url, child_match) in child_matches {
-            if !matches.contains_key(&child_url) {
-                matches.insert(child_url, child_match);
-            }
+            matches.entry(child_url).or_insert(child_match);
         }
     }
 
@@ -138,9 +136,6 @@ fn find_query(html: &str, query: &str, range: usize) -> Option<String> {
         Some(body) => body,
     };
     let text = body.text().collect::<Vec<_>>().join("");
-    if let Some(cursor) = text.find(query) {
-        Some(text[cursor - range..cursor + query.len() + range].to_string())
-    } else {
-        None
-    }
+    text.find(query)
+        .map(|cursor| text[cursor - range..cursor + query.len() + range].to_string())
 }
