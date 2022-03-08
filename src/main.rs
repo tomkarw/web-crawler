@@ -1,7 +1,7 @@
 use reqwest;
 use select::document::Document;
 use select::predicate::Name;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io;
 use std::io::Write;
@@ -9,10 +9,11 @@ use reqwest::Url;
 
 const RANGE: usize = 3;
 const URL: &str = "https://www.layer0.co/";
-const QUERY: &str = "website";
+const QUERY: &str = "knowledge";
+const DEPTH: usize = 2;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let (link_count, matches) = crawl_page(Url::parse(URL)?, QUERY, 2)?;
+    let (link_count, matches) = crawl_page(Url::parse(URL)?, QUERY, DEPTH)?;
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -24,24 +25,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, Vec<(Url, String)>), Box<dyn Error>> {
+fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, HashMap<Url, String>), Box<dyn Error>> {
     if depth == 0 {
-        return Ok((0, Vec::new()));
+        return Ok((0, HashMap::new()));
     }
 
     let response = reqwest::blocking::get(url.clone())?;
     // TODO: handle redirects
     if !response.status().is_success() {
-        return Ok((0, Vec::new()));
+        return Ok((0, HashMap::new()));
     }
     let body = response.text()?;
 
-    let mut link_count = 1;
-    let mut matches = Vec::new();
+    let mut visited_count = 1;
+    let mut matches = HashMap::new();
 
     // TODO: only search "visible" output (inner text)
     if let Some(cursor) = body.find(query) {
-        matches.push((url.clone(), body[cursor-RANGE..cursor+query.len()+RANGE].to_string()));
+        matches.insert(url.clone(), body[cursor-RANGE..cursor+query.len()+RANGE].to_string());
     }
 
     let links = Document::from(body.as_str())
@@ -70,11 +71,21 @@ fn crawl_page(url: Url, query: &str, depth: usize) -> Result<(usize, Vec<(Url, S
         .collect::<HashSet<_>>();
 
     for link in links {
-        let (child_link_count, mut child_matches) = crawl_page(link, query, depth - 1)?;
-        link_count += child_link_count;
-        matches.append(&mut child_matches);
+        // don't visit already visited links
+        if matches.contains_key(&link) {
+            continue;
+        }
+
+        let (child_visited_count, child_matches) = crawl_page(link, query, depth - 1)?;
+        visited_count += child_visited_count;
+
+        // only add new links
+        for (child_url, child_match) in child_matches {
+            if !matches.contains_key(&child_url) {
+                matches.insert(child_url, child_match);
+            }
+        }
     }
 
-    Ok((link_count, matches))
-
+    Ok((visited_count, matches))
 }
