@@ -1,34 +1,55 @@
+use clap::{arg, Arg, Command};
 use reqwest;
+use reqwest::Url;
+use scraper::{Html, Selector};
 use select::document::Document;
 use select::predicate::Name;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io;
 use std::io::Write;
-use clap::{Arg, arg, Command};
-use reqwest::Url;
-use scraper::{Html, Selector};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arg_matches = Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .arg(Arg::new("URL").required(true).help("url to crawl").index(1))
-        .arg(Arg::new("QUERY").required(true).help("query to match on visited pages").index(2))
+        .arg(
+            Arg::new("QUERY")
+                .required(true)
+                .help("query to match on visited pages")
+                .index(2),
+        )
         .arg(arg!(-d --depth <DEPTH>).required(false))
         .arg(arg!(--range <RANGE>).required(false))
         .get_matches();
 
     let url = arg_matches.value_of("URL").unwrap();
     let query = arg_matches.value_of("QUERY").unwrap();
-    let depth = arg_matches.value_of("depth").unwrap_or("").parse::<usize>().unwrap_or(2);
-    let range = arg_matches.value_of("range").unwrap_or("").parse::<usize>().unwrap_or(3);
+    let depth = arg_matches
+        .value_of("depth")
+        .unwrap_or("")
+        .parse::<usize>()
+        .unwrap_or(2);
+    let range = arg_matches
+        .value_of("range")
+        .unwrap_or("")
+        .parse::<usize>()
+        .unwrap_or(3);
 
     let (link_count, matches) = crawl_page(Url::parse(url)?, query, depth, range)?;
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    stdout.write_all((&format!("Crawled {} pages. Found {} pages with the term `{}`\n", link_count, matches.len(), query)).as_ref())?;
+    stdout.write_all(
+        (&format!(
+            "Crawled {} pages. Found {} pages with the term `{}`\n",
+            link_count,
+            matches.len(),
+            query
+        ))
+            .as_ref(),
+    )?;
     for (url, snippet) in matches {
         stdout.write_all((&format!("{} => {}\n", url, snippet)).as_ref())?;
     }
@@ -36,7 +57,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn crawl_page(url: Url, query: &str, depth: usize, range: usize) -> Result<(usize, HashMap<Url, String>), Box<dyn Error>> {
+fn crawl_page(
+    url: Url,
+    query: &str,
+    depth: usize,
+    range: usize,
+) -> Result<(usize, HashMap<Url, String>), Box<dyn Error>> {
     if depth == 0 {
         return Ok((0, HashMap::new()));
     }
@@ -70,7 +96,7 @@ fn crawl_page(url: Url, query: &str, depth: usize, range: usize) -> Result<(usiz
                     } else {
                         None
                     }
-                },
+                }
                 Err(_) => {
                     // TODO: could there be relative links?
                     if raw_url.starts_with("/") {
@@ -109,7 +135,7 @@ fn find_query(html: &str, query: &str, range: usize) -> Option<String> {
     let selector = Selector::parse("html").unwrap();
     let body = match fragment.select(&selector).next() {
         None => return None,
-        Some(body) => body
+        Some(body) => body,
     };
     let text = body.text().collect::<Vec<_>>().join("");
     if let Some(cursor) = text.find(query) {
