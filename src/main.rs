@@ -1,5 +1,4 @@
 use clap::{arg, Arg, Command};
-
 use futures_util::StreamExt;
 use reqwest::Url;
 use scraper::{Html, Selector};
@@ -11,7 +10,6 @@ use std::io;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -23,27 +21,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let arg_matches = Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
-        .arg(Arg::new("URL").required(true).help("url to crawl").index(1))
+        .arg(Arg::new("URL").required(true).help("Url to crawl").index(1))
         .arg(
             Arg::new("QUERY")
                 .required(true)
-                .help("query to match on visited pages")
+                .help("Query to match on visited pages")
                 .index(2),
         )
-        .arg(arg!(-d --depth <DEPTH>).required(false))
-        .arg(arg!(--range <RANGE>).required(false))
+        .arg(
+            arg!(-d --depth <DEPTH> "Crawling recursion depth")
+                .required(false)
+                .default_value("2"),
+        )
+        .arg(
+            arg!(--range <RANGE> "Size of context surrounding matched phrase")
+                .required(false)
+                .default_value("3"),
+        )
         .get_matches();
 
     let url = arg_matches.value_of("URL").unwrap();
     let query = arg_matches.value_of("QUERY").unwrap();
     let depth = arg_matches
         .value_of("depth")
-        .unwrap_or("")
+        .unwrap()
         .parse::<usize>()
         .unwrap_or(2);
     let range = arg_matches
         .value_of("range")
-        .unwrap_or("")
+        .unwrap()
         .parse::<usize>()
         .unwrap_or(3);
 
@@ -52,41 +58,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (link_queue_sender, link_queue_receiver) = mpsc::unbounded_channel::<(Url, usize)>();
     let mut link_queue_receiver = UnboundedReceiverStream::new(link_queue_receiver);
 
-    let query_clone = query.to_string();
-    let link_count_clone = link_count.clone();
-    let query_matches_clone = query_matches.clone();
-    let link_queue_sender_clone = link_queue_sender.clone();
-    tokio::task::spawn(async move {
-        let query = query_clone.clone();
-        let link_count = link_count_clone.clone();
-        let query_matches = query_matches_clone.clone();
-        let link_queue_sender = link_queue_sender_clone.clone();
-        while let Some((url, depth)) = link_queue_receiver.next().await {
-            let query = query.clone();
-            let link_count = link_count.clone();
-            let query_matches = query_matches.clone();
-            let link_queue_sender = link_queue_sender.clone();
-            tokio::task::spawn(async move {
-                crawl_page(
-                    url,
-                    &query,
-                    depth,
-                    range,
-                    link_count,
-                    query_matches,
-                    link_queue_sender,
-                )
-                .await
-                .unwrap();
-            });
-        }
-    });
-
     link_queue_sender.send((Url::parse(url)?, depth))?;
 
-    // TODO: block until link_queue_receiver queue is empty and no more tasks are running.
-    //  Sleeping here is terrible, but at least we get some results.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // FIXME: dropping all link_queue_sender references will exit this while loop
+    //  but that never happens, it starts out with 2 references and is usually stuck at around 3 or 7
+    while let Some((url, depth)) = link_queue_receiver.next().await {
+        let query = query.to_string();
+        let link_count = link_count.clone();
+        let query_matches = query_matches.clone();
+        let link_queue_sender = link_queue_sender.clone();
+        tokio::task::spawn(async move {
+            crawl_page(
+                url,
+                query.as_str(),
+                depth,
+                range,
+                link_count,
+                query_matches,
+                link_queue_sender,
+            )
+            .await
+            .unwrap();
+        });
+    }
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
