@@ -10,8 +10,10 @@ use std::io;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, RwLock};
+use tokio::time::timeout;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 type QueryMatches = Arc<RwLock<HashMap<Url, String>>>;
@@ -68,16 +70,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let query_matches = query_matches.clone();
         let link_queue_sender = link_queue_sender.clone();
         tokio::task::spawn(async move {
-            crawl_page(
-                url,
-                query.as_str(),
-                depth,
-                range,
-                link_count,
-                query_matches,
-                link_queue_sender,
+            timeout(
+                Duration::from_secs(5),
+                crawl_page(
+                    url,
+                    query.as_str(),
+                    depth,
+                    range,
+                    link_count,
+                    query_matches,
+                    link_queue_sender,
+                ),
             )
             .await
+            .unwrap()
             .unwrap();
         });
     }
