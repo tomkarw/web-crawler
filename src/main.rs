@@ -11,6 +11,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use concurrent_queue::ConcurrentQueue;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::timeout;
@@ -18,9 +19,11 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 type QueryMatches = Arc<RwLock<HashMap<Url, String>>>;
 
+const TIMEOUT: Duration = Duration::from_secs(5);
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let arg_matches = Command::new(env!("CARGO_PKG_NAME"))
+    let args = Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .arg(Arg::new("URL").required(true).help("Url to crawl").index(1))
@@ -42,14 +45,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .get_matches();
 
-    let url = arg_matches.value_of("URL").unwrap();
-    let query = arg_matches.value_of("QUERY").unwrap();
-    let depth = arg_matches
+    let url = args.value_of("URL").unwrap();
+    let query = args.value_of("QUERY").unwrap();
+    let depth = args
         .value_of("depth")
         .unwrap()
         .parse::<usize>()
         .unwrap_or(2);
-    let range = arg_matches
+    let range = args
         .value_of("range")
         .unwrap()
         .parse::<usize>()
@@ -61,32 +64,47 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut link_queue_receiver = UnboundedReceiverStream::new(link_queue_receiver);
 
     link_queue_sender.send((Url::parse(url)?, depth))?;
+    
+    let handle_queue = Arc::new(ConcurrentQueue::unbounded());
 
     // FIXME: dropping all link_queue_sender references will exit this while loop
     //  but that never happens, it starts out with 2 references and is usually stuck at around 3 or 7
-    while let Some((url, depth)) = link_queue_receiver.next().await {
+    let receiver_handle = {
         let query = query.to_string();
         let link_count = link_count.clone();
         let query_matches = query_matches.clone();
         let link_queue_sender = link_queue_sender.clone();
+        let handle_queue = handle_queue.clone();
         tokio::task::spawn(async move {
-            timeout(
-                Duration::from_secs(5),
-                crawl_page(
-                    url,
-                    query.as_str(),
-                    depth,
-                    range,
-                    link_count,
-                    query_matches,
-                    link_queue_sender,
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        });
+            while let Some((url, depth)) = link_queue_receiver.next().await {
+                let query = query.to_string();
+                let link_count = link_count.clone();
+                let query_matches = query_matches.clone();
+                let link_queue_sender = link_queue_sender.clone();
+                handle_queue.push(tokio::task::spawn(async move {
+                    if timeout(TIMEOUT,
+                                            crawl_page(
+                                                url.clone(),
+                                                query.as_str(),
+                                                depth,
+                                                range,
+                                                link_count,
+                                                query_matches,
+                                                &link_queue_sender,
+                                            ))
+                        .await.is_err() {
+                        eprintln!("crawl_page({}) timed out", url);
+                    }
+                })).unwrap();
+            }
+        })
+    };
+
+    while handle_queue.is_empty() {}
+    while let Ok(handle) = handle_queue.pop() {
+        tokio::join!(handle).0.unwrap();
     }
+    receiver_handle.abort();
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -113,7 +131,7 @@ async fn crawl_page(
     range: usize,
     link_count: Arc<AtomicUsize>,
     query_matches: QueryMatches,
-    link_queue_sender: UnboundedSender<(Url, usize)>,
+    link_queue_sender: &UnboundedSender<(Url, usize)>,
 ) -> Result<(), Box<dyn Error>> {
     if depth == 0 {
         return Ok(());
@@ -165,6 +183,7 @@ async fn crawl_page(
         }
 
         link_queue_sender.send((link, depth - 1))?;
+
     }
 
     Ok(())
