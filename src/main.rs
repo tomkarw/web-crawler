@@ -1,5 +1,5 @@
 use clap::{arg, Arg, Command};
-use futures_util::StreamExt;
+use concurrent_queue::ConcurrentQueue;
 use reqwest::Url;
 use scraper::{Html, Selector};
 use select::document::Document;
@@ -11,11 +11,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use concurrent_queue::ConcurrentQueue;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::timeout;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::{RwLock};
+use tokio::task::JoinHandle;
 
 type QueryMatches = Arc<RwLock<HashMap<Url, String>>>;
 
@@ -60,57 +57,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let link_count = Arc::new(AtomicUsize::new(0));
     let query_matches = QueryMatches::new(Default::default());
-    let (link_queue_sender, link_queue_receiver) = mpsc::unbounded_channel::<(Url, usize)>();
-    let mut link_queue_receiver = UnboundedReceiverStream::new(link_queue_receiver);
 
-    link_queue_sender.send((Url::parse(url)?, depth))?;
-    
     let handle_queue = Arc::new(ConcurrentQueue::unbounded());
+    handle_queue.push(crawl_page(
+        Url::parse(url)?,
+        query.to_string(),
+        depth,
+        range,
+        link_count.clone(),
+        query_matches.clone(),
+        handle_queue.clone(),
+    )).unwrap();
 
-    // FIXME: dropping all link_queue_sender references will exit this while loop
-    //  but that never happens, it starts out with 2 references and is usually stuck at around 3 or 7
-    let receiver_handle = {
-        let query = query.to_string();
-        let link_count = link_count.clone();
-        let query_matches = query_matches.clone();
-        let link_queue_sender = link_queue_sender.clone();
-        let handle_queue = handle_queue.clone();
-        tokio::task::spawn(async move {
-            while let Some((url, depth)) = link_queue_receiver.next().await {
-                let query = query.to_string();
-                let link_count = link_count.clone();
-                let query_matches = query_matches.clone();
-                let link_queue_sender = link_queue_sender.clone();
-                handle_queue.push(tokio::task::spawn(async move {
-                    if timeout(TIMEOUT,
-                                            crawl_page(
-                                                url.clone(),
-                                                query.as_str(),
-                                                depth,
-                                                range,
-                                                link_count,
-                                                query_matches,
-                                                &link_queue_sender,
-                                            ))
-                        .await.is_err() {
-                        eprintln!("crawl_page({}) timed out", url);
-                    }
-                })).unwrap();
-            }
-        })
-    };
-
-    while handle_queue.is_empty() {}
     while let Ok(handle) = handle_queue.pop() {
         tokio::join!(handle).0.unwrap();
     }
-    receiver_handle.abort();
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     stdout.write_all(
         (&format!(
-            "Crawled {} pages. Found {} pages with the term `{}`\n",
+            "Crawled {} pages. Found {} pages with the term `{}`.\n",
             link_count.load(Ordering::SeqCst),
             query_matches.read().await.len(),
             query
@@ -124,69 +91,79 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn crawl_page(
+fn crawl_page(
     url: Url,
-    query: &str,
+    query: String,
     depth: usize,
     range: usize,
     link_count: Arc<AtomicUsize>,
     query_matches: QueryMatches,
-    link_queue_sender: &UnboundedSender<(Url, usize)>,
-) -> Result<(), Box<dyn Error>> {
-    if depth == 0 {
-        return Ok(());
-    }
-
-    // TODO: make sure what ordering is needed
-    link_count.fetch_add(1, Ordering::AcqRel);
-
-    let response = reqwest::get(url.clone()).await?;
-    // TODO: handle redirects
-    if !response.status().is_success() {
-        return Ok(());
-    }
-    let body = response.text().await?;
-
-    if let Some(matched) = find_query(&body, query, range) {
-        query_matches.write().await.insert(url.clone(), matched);
-    }
-
-    let links = Document::from(body.as_str())
-        .find(Name("a"))
-        .filter_map(|anchor| anchor.attr("href"))
-        .filter_map(|raw_url| {
-            match Url::parse(raw_url) {
-                Ok(new_url) => {
-                    // ignore pages on different domain
-                    if new_url.host() == url.host() {
-                        Some(new_url)
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => {
-                    // TODO: could there be relative links?
-                    if raw_url.starts_with('/') {
-                        url.join(raw_url).ok()
-                    } else {
-                        None
-                    }
-                }
-            }
-        })
-        .collect::<HashSet<_>>();
-
-    for link in links {
-        // don't visit already visited links
-        if query_matches.read().await.contains_key(&link) {
-            continue;
+    handle_queue: Arc<ConcurrentQueue<JoinHandle<()>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if depth == 0 {
+            return; // Ok(());
         }
 
-        link_queue_sender.send((link, depth - 1))?;
+        // TODO: make sure what ordering is needed
+        link_count.fetch_add(1, Ordering::AcqRel);
 
-    }
+        let response = reqwest::get(url.clone()).await.unwrap();
+        // TODO: handle redirects
+        if !response.status().is_success() {
+            return; // Ok(());
+        }
+        let body = response.text().await.unwrap();
 
-    Ok(())
+        if let Some(matched) = find_query(&body, &query, range) {
+            query_matches.write().await.insert(url.clone(), matched);
+        }
+
+        let links = Document::from(body.as_str())
+            .find(Name("a"))
+            .filter_map(|anchor| anchor.attr("href"))
+            .filter_map(|raw_url| {
+                match Url::parse(raw_url) {
+                    Ok(new_url) => {
+                        // ignore pages on different domain
+                        if new_url.host() == url.host() {
+                            Some(new_url)
+                        } else {
+                            None
+                        }
+                    }
+                    Err(_) => {
+                        // TODO: could there be relative links?
+                        if raw_url.starts_with('/') {
+                            url.join(raw_url).ok()
+                        } else {
+                            None
+                        }
+                    }
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        for link in links {
+            // don't visit already visited links
+            if query_matches.read().await.contains_key(&link) {
+                continue;
+            }
+
+            // link_queue_sender.send((link, depth - 1))?;
+            handle_queue.push(crawl_page(
+                link,
+                query.clone(),
+                depth - 1,
+                range,
+                link_count.clone(),
+                query_matches.clone(),
+                handle_queue.clone(),
+            )).unwrap();
+        }
+
+        // Ok(())
+    })
 }
 
 // TODO: only search visible text
