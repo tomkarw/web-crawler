@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .as_ref(),
     )?;
     for (url, snippet) in query_matches.read().await.iter() {
-        stdout.write_all((&format!("{} => {}\n", url, snippet)).as_ref())?;
+        stdout.write_all((&format!("{} => '{}'\n", url, snippet.trim())).as_ref())?;
     }
 
     Ok(())
