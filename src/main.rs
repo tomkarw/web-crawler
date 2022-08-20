@@ -1,17 +1,25 @@
-use clap::{arg, Arg, Command};
-use reqwest::Url;
-use scraper::{Html, Selector};
-use select::document::Document;
-use select::predicate::Name;
+//! Simple binary that allows recursively crawling a webpage, while searching for a keyword.
+//! Multiple pages are crawled efficiently and concurrently.
+
+#![deny(clippy::wildcard_imports)]
+#![warn(clippy::pedantic)]
+
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+use clap::{arg, Arg, Command};
+use reqwest::Url;
+use scraper::{Html, Selector};
+use select::document::Document;
+use select::predicate::Name;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Timeout};
 
+// TODO: remove locks completely
 type QueryMatches = Arc<RwLock<HashMap<Url, String>>>;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,7 +63,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(3);
 
     let link_count = Arc::new(AtomicUsize::new(0));
-    let query_matches = QueryMatches::new(Default::default());
+    let query_matches = QueryMatches::new(RwLock::default());
 
     let (sender, mut receiver) = tokio::sync::mpsc::channel(QUEUE_SIZE);
     sender
@@ -185,11 +193,7 @@ fn find_query(html: &str, query: &str, range: usize) -> Option<String> {
     };
     let text = body.text().collect::<Vec<_>>().join("");
     text.find(query).map(|cursor| {
-        let start = if cursor as isize - range as isize > 0 {
-            cursor - range
-        } else {
-            0
-        };
+        let start = cursor.saturating_sub(range);
         let end = if cursor + query.len() + range > text.len() {
             text.len()
         } else {
